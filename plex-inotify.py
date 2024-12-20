@@ -1,28 +1,7 @@
 # PLEX NOTIFIER SCRIPT v1.4
+# Modernized by https://github.com/kk7ds/plex-inotifier
 # Written by Talisto: https://forums.plex.tv/profile/talisto
 # Modified heavily from https://codesourcery.wordpress.com/2012/11/29/more-on-the-synology-nas-automatically-indexing-new-files/
-
-###################################################
-# MODIFY VARIABLES HERE
-###################################################
-
-# Plex Server IP or hostname
-plex_server_host = '192.168.0.10'
-
-# Plex Server port
-plex_server_port = 32400
-
-# Plex account token; only required if your primary account has a PIN enabled,
-# or if you have multiple users.  Instructions how to get your token:
-# https://support.plex.tv/hc/en-us/articles/204059436-Finding-your-account-token-X-Plex-Token
-plex_account_token = False
-
-# Map the fileserver's local paths to their associated Plex Media Server library names
-path_maps = {
-    '/volume1/video/TV Shows': 'TV Shows',
-    '/volume1/video/Movies': 'Movies',
-    '/volume1/music': 'Music',
-}
 
 # Allowed file extensions
 allowed_exts = [
@@ -31,23 +10,7 @@ allowed_exts = [
     'mpg', 'mp4', 'avi', 'mkv', 'm4a', 'mov', 'wmv', 'm2v', 'm4v', 'vob'
 ]
 
-# Log file
-log_file_path = '/var/log/plex-inotify.log'
-
-# PID file
-pid_file_path = '/var/run/plex-inotify.pid'
-
-# Daemonize (run in the background) or not
-daemonize = False
-
-# connect to PMS using HTTPS instead of HTTP
-# NOTE: The HTTPS connection does not validate the SSL certificate!!
-secure_connection = True
-
-###################################################
-# YOU SHOULDN'T NEED TO TOUCH ANYTHING BELOW HERE
-###################################################
-
+import argparse
 import pyinotify
 import sys
 import os.path
@@ -58,10 +21,10 @@ import urllib.request
 import ssl
 import xml.etree.ElementTree as ET
 import json
+import yaml
+import logging
 
-###################################################
-# CLASSES / FUNCTIONS
-###################################################
+LOG = logging.getLogger('plex-inotify')
 
 class EventHandler(pyinotify.ProcessEvent):
 
@@ -136,10 +99,7 @@ class EventHandler(pyinotify.ProcessEvent):
         return True
 
 def log(text):
-    if not daemonize:
-        print(text)
-    log_file.write(text + "\n")
-    log_file.flush()
+    LOG.info(text)
 
 def signal_handler(signal, frame):
     log("Exiting")
@@ -163,7 +123,22 @@ def url_open(url, token):
 # MAIN PROGRAM STARTS HERE
 ###################################################
 
-log_file = open(log_file_path, 'a')
+parser = argparse.ArgumentParser()
+parser.add_argument('config',
+                    help='Path to YAML config file')
+parser.add_argument('--insecure', action='store_true', default=False,
+                    help='Use HTTP to connect to plex')
+parser.add_argument('-D', '--daemonize',
+                    action='store_true', default=False,
+                    help='Daemonize')
+parser.add_argument('--log', help='Log to this file instead of stdout')
+parser.add_argument('--pidfile', default='/var/run/plex-inotify.pid',
+                    help='Write PID to this file')
+args = parser.parse_args()
+logging.basicConfig(level=logging.DEBUG, filename=args.log)
+
+with open(args.config) as f:
+    config = yaml.load(f, Loader=yaml.SafeLoader)
 
 watch_events = pyinotify.IN_CLOSE_WRITE \
     | pyinotify.IN_DELETE \
@@ -173,32 +148,33 @@ watch_events = pyinotify.IN_CLOSE_WRITE \
 
 signal.signal(signal.SIGTERM, signal_handler)
 
-if secure_connection:
-    protocol = 'https'
-else:
+if args.insecure:
     protocol = 'http'
+else:
+    protocol = 'https'
 
 libraries = {}
 response = url_open(
     "%s://%s:%d/library/sections" % (
         protocol,
-        plex_server_host,
-        plex_server_port
+        config['host'],
+        config['port']
     ),
-    plex_account_token
+    config['plex_token']
 )
 tree = ET.fromstring(response.read().decode("utf-8"))
 for directory in tree:
-    for path, name in path_maps.items():
+    for name, path_map in config['path_maps'].items():
         if directory.attrib['title'] == name:
-            libraries[path] = int(directory.attrib['key'])
+            for path in path_map['paths']:
+                libraries[path] = int(directory.attrib['key'])
 log("Got Plex libraries: " + json.dumps(libraries))
 
 handler = EventHandler(
-    plex_server_host,
-    plex_server_port,
+    config['host'],
+    config['port'],
     protocol,
-    plex_account_token,
+    config['plex_token'],
     libraries,
     allowed_exts
 )
@@ -217,6 +193,6 @@ wdd = wm.add_watch(
 log('Starting loop')
 
 try:
-    notifier.loop(daemonize=daemonize, pid_file=pid_file_path)
+    notifier.loop(daemonize=args.daemonize, pid_file=args.pidfile)
 except pyinotify.NotifierError as err:
     print(err, file=sys.stderr)

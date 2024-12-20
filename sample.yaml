@@ -1,0 +1,11 @@
+host: myplex
+port: 32400
+plex_token: TOKENHERE
+path_maps:
+  TV Shows:
+    paths:
+      - /media/TV
+      - /media/TV-2
+  Movies:
+    paths:
+      - /media/Movies
