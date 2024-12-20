@@ -17,12 +17,15 @@ import os.path
 from subprocess import call
 import signal
 import fnmatch
-import urllib.request
 import ssl
 import xml.etree.ElementTree as ET
 import json
 import yaml
 import logging
+import threading
+import time
+import requests
+import urllib3
 
 LOG = logging.getLogger('plex-inotify')
 
@@ -105,19 +108,11 @@ def signal_handler(signal, frame):
     log("Exiting")
     sys.exit(0)
 
-# custom urlopen() function to bypass SSL certificate validation
 def url_open(url, token):
-    if token:
-        req = urllib.request.Request(url + '?X-Plex-Token=' + token)
-    else:
-        req = urllib.request.Request(url)
-    if url.startswith('https'):
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        return urllib.request.urlopen(req, context=ctx)
-    else:
-        return urllib.request.urlopen(req)
+    r = requests.get(url, params={'X-Plex-Token': token}, verify=False)
+    if r.status_code != 200:
+        LOG.error('Plex rejected request: %s %s', r.status_code, r.reason)
+    return r
 
 ###################################################
 # MAIN PROGRAM STARTS HERE
@@ -162,7 +157,7 @@ response = url_open(
     ),
     config['plex_token']
 )
-tree = ET.fromstring(response.read().decode("utf-8"))
+tree = ET.fromstring(response.content.decode("utf-8"))
 for directory in tree:
     for name, path_map in config['path_maps'].items():
         if directory.attrib['title'] == name:
