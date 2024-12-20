@@ -28,6 +28,56 @@ import requests
 import urllib3
 
 LOG = logging.getLogger('plex-inotify')
+logging.getLogger('urllib3.connectionpool').setLevel(logging.INFO)
+urllib3.disable_warnings()
+
+# A background thread that schedules the actual scans and:
+# - Makes sure we only scan a library after some quiet period of updates
+# - Makes sure that we leave some time for a scan to complete before starting
+#   another.
+class UpdateThread(threading.Thread):
+    def __init__(self, event_handler, *a, **k):
+        self._dwell_time = k.pop('dwell_time', 10)
+        self._run_time = k.pop('run_time', 60)
+        self._event_handler = event_handler
+        super().__init__(*a, **k)
+        self._lock = threading.Lock()
+        self._pending = {}
+        self._last = 0
+        self.daemon = True
+        self.log = logging.getLogger('worker')
+
+    def queue_update(self, library_id):
+        self.log.info('Queuing update for %i', library_id)
+        with self._lock:
+            self._pending[library_id] = time.monotonic()
+
+    def _do(self):
+        for library_id, last in self._pending.items():
+            # Find the first candidate library, schedule it, and bail
+            if time.monotonic() - last > self._dwell_time:
+                self.log.info('Time to scan library %i', library_id)
+                self._pending.pop(library_id)
+                self._event_handler.update_section(library_id)
+                self._last = time.monotonic()
+                break
+
+    def run(self):
+        self.log.info('Alive')
+        while True:
+            # No pending updates, delay longer before checking again
+            if not self._pending:
+                time.sleep(self._dwell_time)
+                continue
+            # Last scan was recent, don't schedule any more for a while
+            if time.monotonic() - self._last < self._run_time:
+                self.log.debug('Waiting for scan...')
+                time.sleep(self._dwell_time)
+                continue
+            # Pending updates, no timers, schedule one
+            with self._lock:
+                self._do()
+            time.sleep(1)
 
 class EventHandler(pyinotify.ProcessEvent):
 
@@ -39,6 +89,8 @@ class EventHandler(pyinotify.ProcessEvent):
         self.protocol = protocol
         self.libraries = libraries
         self.allowed_exts = allowed_exts
+        self._thread = UpdateThread(self)
+        self._thread.start()
 
     def process_IN_CREATE(self, event):
         self.process_path(event, 'CREATE')
@@ -71,7 +123,7 @@ class EventHandler(pyinotify.ProcessEvent):
                         event.pathname,
                         self.libraries[path]
                     ))
-                    self.update_section(self.libraries[path])
+                    self._thread.queue_update(self.libraries[path])
 
             # Remove from list of modified files.
             try:
